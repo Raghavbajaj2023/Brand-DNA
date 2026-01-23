@@ -6,232 +6,256 @@ from colorthief import ColorThief
 from io import BytesIO
 from urllib.parse import urljoin, urlparse
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+import random
 
-# --- 1. SETUP & CONFIG ---
-st.set_page_config(page_title="Pomelli: Real Image Remix", page_icon="🖼️", layout="centered")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(page_title="Pomelli Clone", page_icon="🧪", layout="centered")
 
-# --- 2. SIDEBAR ---
+# Custom CSS to make it look a bit more like the Pomelli Dark Theme
+st.markdown("""
+<style>
+    .step-header { font-size: 24px; font-weight: bold; margin-bottom: 10px; color: #a4c639; }
+    .dna-box { background-color: #2b2b2b; padding: 20px; border-radius: 10px; border: 1px solid #444; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- STATE MANAGEMENT (Tracks which step the user is on) ---
+if 'step' not in st.session_state: st.session_state.step = 1
+if 'dna' not in st.session_state: st.session_state.dna = None
+if 'ideas' not in st.session_state: st.session_state.ideas = []
+if 'selected_idea' not in st.session_state: st.session_state.selected_idea = ""
+
+# --- SIDEBAR: API KEY ---
 with st.sidebar:
-    st.header("⚙️ Settings")
+    st.image("https://cdn-icons-png.flaticon.com/512/3678/3678443.png", width=50)
+    st.title("Settings")
     api_key = st.text_input("Google Gemini API Key", type="password")
-    st.markdown("[Get Key Here](https://aistudio.google.com/app/apikey)")
+    st.markdown("[Get Free Key](https://aistudio.google.com/app/apikey)")
 
-# --- 3. HELPER FUNCTIONS ---
+# --- FUNCTIONS ---
 
-def get_brand_dna(url):
-    """Extracts Logo, Title, and Color"""
+def scrape_website(url):
+    """Step 1: Extract Brand DNA (Tone, Colors, Images)"""
     if not url.startswith('http'): url = 'https://' + url
     headers = {"User-Agent": "Mozilla/5.0"}
+    
     try:
         response = requests.get(url, timeout=10, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         
+        # 1. Title & Text for Tone Analysis
         title = soup.title.string.strip() if soup.title else "Brand"
+        paragraphs = [p.text for p in soup.find_all('p')[:10]] # Get first 10 paragraphs
+        website_text = " ".join(paragraphs)
         
-        # Find Logo
+        # 2. Logo & Colors
         icon_link = soup.find("link", rel=lambda x: x and 'icon' in x.lower())
         logo_url = "https://cdn-icons-png.flaticon.com/512/3678/3678443.png"
         if icon_link and icon_link.get('href'):
             logo_url = urljoin(url, icon_link.get('href'))
 
-        # Extract Color
         try:
             logo_resp = requests.get(logo_url, headers=headers, timeout=5)
             ct = ColorThief(BytesIO(logo_resp.content))
             dom_color = ct.get_color(quality=1)
             hex_color = '#{:02x}{:02x}{:02x}'.format(*dom_color)
         except:
-            hex_color = "#000000"
+            hex_color = "#D4E157" # Pomelli Green Fallback
 
-        return {"name": title, "logo": logo_url, "color": hex_color}
-    except:
-        return None
-
-def scrape_website_images(url):
-    """Finds all standard images on the page"""
-    if not url.startswith('http'): url = 'https://' + url
-    headers = {"User-Agent": "Mozilla/5.0"}
-    image_urls = []
-    
-    try:
-        response = requests.get(url, timeout=10, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Find all img tags
+        # 3. Images
+        images = []
         for img in soup.find_all('img'):
             src = img.get('src')
             if src:
                 full_url = urljoin(url, src)
-                # Filter out tiny icons or SVGs (basic filter)
-                ext = urlparse(full_url).path.lower()
-                if any(x in ext for x in ['.jpg', '.jpeg', '.png', '.webp']):
-                    if full_url not in image_urls:
-                        image_urls.append(full_url)
+                if any(x in full_url.lower() for x in ['.jpg', '.jpeg', '.png', '.webp']):
+                    if full_url not in images: images.append(full_url)
         
-        return image_urls[:20] # Return top 20 images to save memory
-    except:
-        return []
-
-def create_social_post(base_img_url, logo_url, brand_name, headline, brand_color):
-    """Composites the final image: Base Photo + Dark Overlay + Text + Logo"""
-    try:
-        # 1. Load Base Image
-        response = requests.get(base_img_url)
-        base_img = Image.open(BytesIO(response.content)).convert("RGBA")
-        
-        # 2. Resize to Square (Instagram style) - 1080x1080
-        target_size = (1080, 1080)
-        base_img = ImageOps.fit(base_img, target_size, method=Image.Resampling.LANCZOS)
-        
-        # 3. Create Drawing Context
-        final_img = Image.new("RGBA", target_size)
-        final_img.paste(base_img, (0,0))
-        draw = ImageDraw.Draw(final_img)
-        
-        # 4. Add "Gradient" Overlay (Dark at bottom to make text pop)
-        # We simulate a gradient by drawing a semi-transparent box at the bottom
-        overlay = Image.new("RGBA", target_size, (0,0,0,0))
-        overlay_draw = ImageDraw.Draw(overlay)
-        # Draw a black box with 60% opacity at the bottom half
-        overlay_draw.rectangle([(0, 500), (1080, 1080)], fill=(0, 0, 0, 160))
-        final_img = Image.alpha_composite(final_img, overlay)
-        draw = ImageDraw.Draw(final_img)
-
-        # 5. Add Logo (Top Center)
-        try:
-            logo_resp = requests.get(logo_url)
-            logo = Image.open(BytesIO(logo_resp.content)).convert("RGBA")
-            logo.thumbnail((150, 150)) # Resize logo
-            # Center the logo
-            logo_x = (1080 - logo.width) // 2
-            final_img.paste(logo, (logo_x, 80), logo)
-        except:
-            pass # Skip logo if fails
-
-        # 6. Add Text (Headline)
-        # Simple text wrapping logic
-        font_size = 60
-        # NOTE: Since we can't easily upload fonts, we use the default PIL font 
-        # which is small, or try to load a system font if possible. 
-        # For this demo, we use default but scale logic is limited.
-        # Ideally, you'd include a .ttf file in your repo.
-        
-        try:
-            font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
-        except:
-            font = ImageFont.load_default()
-            # Default font is tiny, so we can't do much with it without a .ttf file
-            # But let's try to proceed.
-
-        # Draw Headline
-        text_y = 650
-        margin = 100
-        import textwrap
-        lines = textwrap.wrap(headline, width=25) # Wrap text
-        
-        for line in lines:
-            # We calculate width to center it
-            # precise calculation depends on font, simplified here
-            draw.text((margin, text_y), line, font=font, fill="white")
-            text_y += font_size + 10
-            
-        # Draw "Shop Now" Button
-        button_y = text_y + 50
-        draw.rectangle([(margin, button_y), (margin + 300, button_y + 80)], fill=brand_color)
-        draw.text((margin + 80, button_y + 25), "LEARN MORE", font=font, fill="white")
-
-        return final_img
-        
+        return {
+            "name": title, "logo": logo_url, "color": hex_color, 
+            "images": images[:8], "text": website_text
+        }
     except Exception as e:
-        print(e)
         return None
 
-# --- 4. MAIN APP INTERFACE ---
+def analyze_tone(text, model):
+    """Uses Gemini to figure out the brand's 'Tone of Voice'"""
+    prompt = f"Analyze this website text and describe the brand's 'Tone of Voice' in exactly 3 adjectives (e.g., Professional, Bold, Friendly): {text[:2000]}"
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except:
+        return "Modern, Engaging, Professional"
 
-st.title("🖼️ Brand Remix Studio")
-st.write("Turn your existing website photos into social media ads.")
+def generate_campaign_ideas(brand_name, tone, model):
+    """Step 2: Generate Marketing Ideas"""
+    prompt = f"Generate 3 short, distinct social media campaign ideas for '{brand_name}' using a '{tone}' tone. Example: 'Flash Sale Alert', 'Behind the Scenes', 'Product Spotlight'. Output as a numbered list."
+    try:
+        response = model.generate_content(prompt)
+        # Parse the numbered list into a Python list
+        lines = [line.strip().lstrip("1234567890. ") for line in response.text.split("\n") if line.strip()]
+        return lines[:3]
+    except:
+        return ["Launch New Product", "Customer Testimonials", "Seasonal Sale Promotion"]
 
-# A. SCANNER
-url_input = st.text_input("Website URL", placeholder="https://www.nike.com")
-if "scanned_images" not in st.session_state:
-    st.session_state["scanned_images"] = []
-if "brand_info" not in st.session_state:
-    st.session_state["brand_info"] = None
+def create_branded_creative(image_url, logo_url, brand_name, headline, color):
+    """Step 3: Overlay Brand DNA onto Website Image"""
+    try:
+        # Load background image
+        resp = requests.get(image_url)
+        base = Image.open(BytesIO(resp.content)).convert("RGBA")
+        base = ImageOps.fit(base, (1080, 1080), Image.Resampling.LANCZOS)
+        
+        # Add a colored gradient/overlay box at the bottom
+        overlay = Image.new("RGBA", (1080, 1080), (0,0,0,0))
+        draw = ImageDraw.Draw(overlay)
+        
+        # Convert hex to RGB for the overlay
+        color = color.lstrip('#')
+        r, g, b = tuple(int(color[i:i+2], 16) for i in (0, 2, 4))
+        draw.rectangle([(0, 650), (1080, 1080)], fill=(r, g, b, 230)) # 90% opacity
+        
+        final_img = Image.alpha_composite(base, overlay)
+        draw = ImageDraw.Draw(final_img)
 
-if st.button("🔍 Scan Website"):
-    if not url_input:
-        st.warning("Enter a URL")
-    else:
-        with st.spinner("Finding logos and products..."):
-            # 1. Get DNA
-            st.session_state["brand_info"] = get_brand_dna(url_input)
-            # 2. Get Images
-            st.session_state["scanned_images"] = scrape_website_images(url_input)
-            
-            if not st.session_state["scanned_images"]:
-                st.warning("No images found. The site might block scrapers. Try a different site.")
-            else:
-                st.success(f"Found {len(st.session_state['scanned_images'])} images!")
+        # Add Logo
+        try:
+            l_resp = requests.get(logo_url)
+            logo = Image.open(BytesIO(l_resp.content)).convert("RGBA")
+            logo.thumbnail((120, 120))
+            final_img.paste(logo, (480, 50), logo)
+        except: pass
 
-# B. EDITOR
-if st.session_state["brand_info"] and st.session_state["scanned_images"]:
-    b = st.session_state["brand_info"]
-    
-    st.divider()
-    st.subheader("1. Select an Image")
-    
-    # Show images in a grid
-    imgs = st.session_state["scanned_images"]
-    
-    # Let user select by index using a clearer selector
-    # We display thumbnails to help them choose
-    cols = st.columns(4)
-    for i, img_url in enumerate(imgs[:8]): # Show first 8
-        with cols[i % 4]:
-            st.image(img_url, use_container_width=True)
-            st.caption(f"Image #{i+1}")
+        # Add Headline Text
+        try: font = ImageFont.truetype("DejaVuSans-Bold.ttf", 65)
+        except: font = ImageFont.load_default() # Fallback
 
-    selected_index = st.number_input("Enter Image # to use:", min_value=1, max_value=len(imgs), value=1) - 1
-    selected_img_url = imgs[selected_index]
+        import textwrap
+        lines = textwrap.wrap(headline, width=20)
+        y_text = 750
+        for line in lines:
+            draw.text((100, y_text), line, font=font, fill="white")
+            y_text += 70
+
+        return final_img
+    except Exception as e:
+        return None
+
+
+# --- UI LAYOUT ---
+
+st.title("🧪 Pomelli: AI Marketing Generator")
+st.write("Generate high-quality, on-brand creatives in 3 steps.")
+
+# Progress Bar
+progress = st.progress(st.session_state.step / 3.0)
+
+# ==========================================
+# STEP 1: BUSINESS DNA
+# ==========================================
+if st.session_state.step == 1:
+    st.markdown('<div class="step-header">1. Build your Business DNA</div>', unsafe_allow_html=True)
+    st.write("Enter your website and we'll analyze your brand and business.")
     
-    st.divider()
-    st.subheader("2. Customize Design")
+    url = st.text_input("Website URL:", placeholder="https://yourbusiness.com")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        topic = st.text_input("Topic", "New Collection Available")
-        b['color'] = st.color_picker("Brand Color", b['color'])
-    
-    if st.button("✨ Generate Creative"):
-        if not api_key:
-            st.error("Need Gemini API Key")
+    if st.button("🧬 Generate Business DNA"):
+        if not api_key: st.error("Please add your Gemini API Key in the sidebar.")
+        elif not url: st.warning("Please enter a URL.")
         else:
-            with st.spinner("Designing..."):
-                # 1. AI writes the text
+            with st.spinner("Analyzing website text, colors, and images..."):
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel('gemini-1.5-flash')
-                prompt = f"Write a 5-word catchy headline for {b['name']} about {topic}. No hashtags. No quotes."
-                try:
-                    resp = model.generate_content(prompt)
-                    headline = resp.text.strip().replace('"', '')
-                except:
-                    headline = topic.upper()
-
-                # 2. Python designs the image
-                final_image = create_social_post(
-                    selected_img_url, 
-                    b['logo'], 
-                    b['name'], 
-                    headline, 
-                    b['color']
-                )
                 
-                if final_image:
-                    st.image(final_image, caption="Final Ad Creative")
-                    
-                    # Download Button
-                    buf = BytesIO()
-                    final_image.save(buf, format="PNG")
-                    st.download_button("Download Image", buf.getvalue(), "ad_creative.png", "image/png")
+                # Scrape
+                dna = scrape_website(url)
+                if dna:
+                    # Analyze Tone
+                    dna['tone'] = analyze_tone(dna['text'], model)
+                    st.session_state.dna = dna
+                    st.session_state.step = 2
+                    st.rerun() # Move to Step 2
                 else:
-                    st.error("Error creating image. The source image format might not be supported.")
+                    st.error("Failed to analyze website. Please check the URL.")
+
+# ==========================================
+# STEP 2: CAMPAIGN IDEAS
+# ==========================================
+elif st.session_state.step == 2:
+    st.markdown('<div class="step-header">2. Get Campaign Ideas</div>', unsafe_allow_html=True)
+    dna = st.session_state.dna
+    
+    # Show DNA Profile
+    with st.expander("🧬 View Extracted Business DNA", expanded=True):
+        col1, col2, col3 = st.columns([1,2,2])
+        col1.image(dna['logo'], width=60)
+        col2.write(f"**Tone:** {dna['tone']}")
+        col3.color_picker("Brand Color:", dna['color'], disabled=True)
+        st.write("**Extracted Images:**")
+        st.image(dna['images'][:4], width=100)
+
+    st.write("We used your Business DNA to create tailored marketing ideas:")
+    
+    # Generate Ideas if not already done
+    if not st.session_state.ideas:
+        with st.spinner("Brainstorming campaign ideas..."):
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            st.session_state.ideas = generate_campaign_ideas(dna['name'], dna['tone'], model)
+
+    # User Selection
+    selected = st.radio("Choose a campaign focus:", st.session_state.ideas + ["Write my own idea..."])
+    custom_idea = ""
+    if selected == "Write my own idea...":
+        custom_idea = st.text_input("What is your campaign idea?")
+
+    col_btn1, col_btn2 = st.columns([1, 4])
+    with col_btn1:
+        if st.button("⬅️ Back"):
+            st.session_state.step = 1
+            st.rerun()
+    with col_btn2:
+        if st.button("🎨 Next: Generate Creatives"):
+            st.session_state.selected_idea = custom_idea if custom_idea else selected
+            st.session_state.step = 3
+            st.rerun()
+
+# ==========================================
+# STEP 3: GENERATE CREATIVES
+# ==========================================
+elif st.session_state.step == 3:
+    st.markdown('<div class="step-header">3. Generate Creatives</div>', unsafe_allow_html=True)
+    st.write(f"Creating assets for: **{st.session_state.selected_idea}**")
+    
+    dna = st.session_state.dna
+    
+    if st.button("✨ Regenerate Creatives"):
+        st.rerun()
+
+    # Generate the actual creatives using the scraped images
+    with st.spinner("Designing on-brand creatives..."):
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # 1. AI writes Headlines
+        prompt = f"Write a 4-word catchy headline for a social media ad about '{st.session_state.selected_idea}' for '{dna['name']}'. Tone: {dna['tone']}. No quotes."
+        response = model.generate_content(prompt)
+        headline = response.text.strip()
+        
+        # 2. Display Generated Images (Using the first 2 scraped images)
+        st.subheader("Your Generated Assets")
+        cols = st.columns(2)
+        
+        for i, img_url in enumerate(dna['images'][:2]):
+            creative = create_branded_creative(img_url, dna['logo'], dna['name'], headline, dna['color'])
+            if creative:
+                with cols[i]:
+                    st.image(creative, use_container_width=True)
+                    # Download
+                    buf = BytesIO()
+                    creative.save(buf, format="PNG")
+                    st.download_button(f"Download Asset {i+1}", buf.getvalue(), f"pomelli_asset_{i+1}.png", "image/png")
+
+    if st.button("⬅️ Back to Ideas"):
+        st.session_state.step = 2
+        st.rerun()
