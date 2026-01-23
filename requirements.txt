@@ -4,3 +4,5 @@ requests
 beautifulsoup4
 colorthief
 pillow
+python-dotenv
+watchdog
